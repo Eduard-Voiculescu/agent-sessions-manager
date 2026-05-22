@@ -56,4 +56,10 @@ type Agent interface {
 
 	// ResumeCommand builds the argv for resuming an existing session.
 	ResumeCommand(s Session) (bin string, args []string)
+
+	// Archive moves the on-disk transcripts associated with the session into
+	// an archival location so subsequent Discover calls no longer surface
+	// them. Called by asm during delete. A nil return is valid when there
+	// is nothing on disk to archive.
+	Archive(s Session) error
 }

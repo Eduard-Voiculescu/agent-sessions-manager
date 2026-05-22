@@ -86,10 +86,7 @@ func (m Model) renderHeader() string {
 // --- body --------------------------------------------------------------------
 
 func (m Model) renderBody(h int) string {
-	sidebarW := 36
-	if m.width < 100 {
-		sidebarW = 30
-	}
+	sidebarW := m.sidebarWidth()
 	mainW := m.width - sidebarW - 2
 	if mainW < 20 {
 		mainW = 20
@@ -98,6 +95,15 @@ func (m Model) renderBody(h int) string {
 	sidebar := m.renderSidebar(sidebarW, h)
 	main := m.renderMain(mainW, h)
 	return lipgloss.JoinHorizontal(lipgloss.Top, sidebar, main)
+}
+
+// sidebarWidth returns the sidebar column width. Used in both renderBody
+// and viewerDims so the right pane matches what's actually rendered.
+func (m Model) sidebarWidth() int {
+	if m.width < 110 {
+		return 40
+	}
+	return 46
 }
 
 // --- sidebar -----------------------------------------------------------------
@@ -236,10 +242,17 @@ func (m Model) renderDetailPane(w, h int, s agent.Session) string {
 	}
 
 	// Metadata rows.
-	metaRows := []string{
+	var metaRows []string
+	if s.ID != "" {
+		metaRows = append(metaRows, fmt.Sprintf("%s %s",
+			labelStyle.Render("id"),
+			mutedStyle.Render(s.ID),
+		))
+	}
+	metaRows = append(metaRows,
 		fmt.Sprintf("%s %s", labelStyle.Render("state"), stateBit),
 		fmt.Sprintf("%s %s", labelStyle.Render("branch"), branch),
-	}
+	)
 	if s.WorktreePath != "" {
 		metaRows = append(metaRows, fmt.Sprintf("%s %s",
 			labelStyle.Render("worktree"),
@@ -273,15 +286,24 @@ func (m Model) renderDetailPane(w, h int, s agent.Session) string {
 		))
 	}
 
-	// Last assistant section.
+	// Recent assistant turns section.
 	var lastBlock string
-	if haveSummary && sum.lastAssistant != "" {
-		divider := mutedStyle.Render(strings.Repeat("─", innerW-2) + "  last assistant turn")
-		body := wrapAndClamp(sum.lastAssistant, innerW, lastAssistantLines(h))
-		lastBlock = "\n" + divider + "\n\n" + body
-	} else if s.TranscriptPath == "" {
+	switch {
+	case haveSummary && len(sum.recentAssistants) > 0:
+		count := len(sum.recentAssistants)
+		label := fmt.Sprintf("last %d assistant turn(s)", count)
+		divider := mutedStyle.Render(strings.Repeat("─", innerW-2) + "  " + label)
+		linesPerTurn := perTurnLines(h, count)
+		var rendered []string
+		for i, t := range sum.recentAssistants {
+			marker := mutedStyle.Render(fmt.Sprintf("[%d/%d]", i+1, count))
+			body := wrapAndClamp(t, innerW, linesPerTurn)
+			rendered = append(rendered, marker+"\n"+body)
+		}
+		lastBlock = "\n" + divider + "\n\n" + strings.Join(rendered, "\n\n")
+	case s.TranscriptPath == "":
 		lastBlock = "\n" + mutedStyle.Render("No transcript yet. Press ↵ to launch this session.")
-	} else if !haveSummary {
+	case !haveSummary:
 		lastBlock = "\n" + mutedStyle.Render("loading transcript…")
 	}
 
@@ -294,10 +316,31 @@ func (m Model) renderDetailPane(w, h int, s agent.Session) string {
 	return mainBoxStyle.Width(w).Height(h).Render(content)
 }
 
+// perTurnLines returns how many wrapped lines we allow per recent assistant
+// turn so that all `count` turns fit inside the pane.
+func perTurnLines(paneH, count int) int {
+	if count <= 0 {
+		return 4
+	}
+	// pane height − borders/padding (2) − header (1) − blank (1) − meta (≈6)
+	// − divider+blank (2) − marker+blank between turns (2 per turn except last)
+	usable := paneH - 12 - (count-1)*2
+	if usable < count*2 {
+		return 2
+	}
+	n := usable / count
+	if n < 2 {
+		n = 2
+	}
+	if n > 8 {
+		n = 8
+	}
+	return n
+}
+
 // lastAssistantLines returns roughly how many lines we'll dedicate to the
 // last-assistant block given the available pane height.
 func lastAssistantLines(h int) int {
-	// pane height − borders/padding (2) − header (1) − blank (1) − meta (≈5) − divider+blank (2)
 	n := h - 11
 	if n < 4 {
 		n = 4
@@ -386,11 +429,25 @@ func (m Model) renderDeleteConfirm(force bool) string {
 	s := m.sessions[m.deleteTarget]
 	title := statDisconStyle.Render("Delete session")
 
-	body := lipgloss.JoinVertical(lipgloss.Left,
-		title, "",
-		fmt.Sprintf("worktree: %s", s.WorktreePath),
-		fmt.Sprintf("branch:   %s", s.Branch),
-	)
+	var body string
+	if s.WorktreePath != "" {
+		body = lipgloss.JoinVertical(lipgloss.Left,
+			title, "",
+			fmt.Sprintf("worktree: %s", s.WorktreePath),
+			fmt.Sprintf("branch:   %s", s.Branch),
+		)
+	} else {
+		// Disconnected — no worktree to remove; this is a pure transcript archive.
+		body = lipgloss.JoinVertical(lipgloss.Left,
+			title, "",
+			fmt.Sprintf("transcript: %s", filepath.Base(s.TranscriptPath)),
+			mutedStyle.Render("(orphan — no worktree to remove)"),
+		)
+	}
+
+	body = lipgloss.JoinVertical(lipgloss.Left, body, "",
+		mutedStyle.Render("Transcripts will be moved to ~/.claude/projects/.archived/"))
+
 	if force {
 		warn := statDisconStyle.Render("⚠ worktree has uncommitted changes — this will discard them.")
 		body = lipgloss.JoinVertical(lipgloss.Left, body, "", warn)
@@ -421,8 +478,16 @@ func (m Model) renderHelp() string {
 }
 
 func (m Model) renderViewerPane(w, h int) string {
-	title := titleStyle.Render("transcript · " + m.viewerTitle)
-	hint := mutedStyle.Render("↑/↓ scroll   esc close")
+	titleText := "transcript · " + m.viewerTitle
+	if m.viewerFull {
+		titleText += "  " + accentStyle.Render("[full]")
+	}
+	title := titleStyle.Render(titleText)
+	toggleHint := "e expand"
+	if m.viewerFull {
+		toggleHint = "e collapse"
+	}
+	hint := mutedStyle.Render("↑/↓ scroll   " + toggleHint + "   esc close")
 	body := lipgloss.JoinVertical(lipgloss.Left, title, "", m.viewer.View(), "", hint)
 	return mainBoxStyle.Width(w).Height(h).Render(body)
 }

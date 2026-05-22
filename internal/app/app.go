@@ -58,8 +58,11 @@ type Model struct {
 	filterInput  textinput.Model
 	visible      []int // indices into sessions, post-filter
 
-	viewer        viewport.Model
-	viewerTitle   string
+	viewer       viewport.Model
+	viewerTitle  string
+	viewerPath   string // transcript path the viewer is open on; re-rendered on toggle
+	viewerRaw    string // unwrapped transcript body; re-wrapped on resize
+	viewerFull   bool   // true = no trimming of thinking/tool blocks
 
 	// detailCache maps a transcript path → its lightweight summary, used to
 	// render the right-pane session detail without re-parsing on every keystroke.

@@ -8,15 +8,19 @@ import (
 	"time"
 )
 
+// recentAssistantCount is how many trailing assistant turns we keep
+// for display in the detail pane.
+const recentAssistantCount = 5
+
 // transcriptSummary is the cached, lightweight digest of a session's JSONL
 // shown in the detail pane. It's recomputed when the file's mtime advances.
 type transcriptSummary struct {
-	mtime          time.Time
-	bytes          int64
-	userTurns      int
-	assistantTurns int
-	lastAssistant  string
-	lastAssistantAt time.Time
+	mtime             time.Time
+	bytes             int64
+	userTurns         int
+	assistantTurns    int
+	recentAssistants  []string  // chronological — oldest first, newest last
+	lastAssistantAt   time.Time
 }
 
 // summarize parses path and returns turn counts plus the last assistant turn.
@@ -53,7 +57,8 @@ func summarize(path string) (transcriptSummary, error) {
 		if entry.Type != "user" && entry.Type != "assistant" && entry.Type != "message" {
 			continue
 		}
-		role, text := extractMessage(entry.Message)
+		// Detail pane is constrained — always summarize, never full.
+		role, text := extractMessage(entry.Message, false)
 		if role == "" {
 			role = entry.Type
 		}
@@ -65,7 +70,10 @@ func summarize(path string) (transcriptSummary, error) {
 			sum.userTurns++
 		case "assistant":
 			sum.assistantTurns++
-			sum.lastAssistant = text
+			sum.recentAssistants = append(sum.recentAssistants, text)
+			if len(sum.recentAssistants) > recentAssistantCount {
+				sum.recentAssistants = sum.recentAssistants[len(sum.recentAssistants)-recentAssistantCount:]
+			}
 			sum.lastAssistantAt = fi.ModTime()
 		}
 	}

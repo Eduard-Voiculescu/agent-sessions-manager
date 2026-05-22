@@ -7,6 +7,7 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/eduard-voiculescu/agent-sessions-manager/internal/agent"
 	"github.com/eduard-voiculescu/agent-sessions-manager/internal/session"
@@ -22,6 +23,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			w, h := m.viewerDims()
 			m.viewer.Width = w
 			m.viewer.Height = h
+			if m.viewerRaw != "" {
+				m.viewer.SetContent(ansi.Wrap(m.viewerRaw, w, " -"))
+			}
 		}
 		return m, nil
 
@@ -119,12 +123,6 @@ func (m Model) handleDelete() (tea.Model, tea.Cmd) {
 		)
 		return m, nil
 	}
-	if s.WorktreePath == "" {
-		// Disconnected: nothing to remove via git; deletion of orphan transcripts is M5.
-		m.mode = modeBlocker
-		m.blockerText = "This row has no worktree to remove. Transcript cleanup is not implemented in v1."
-		return m, nil
-	}
 	m.deleteTarget = idx
 	m.mode = modeDeleteConfirm
 	return m, nil
@@ -158,7 +156,8 @@ func (m Model) handleView() (tea.Model, tea.Cmd) {
 		m.blockerText = "No transcript on this row."
 		return m, nil
 	}
-	body, err := renderTranscript(s.TranscriptPath)
+	m.viewerFull = false
+	body, err := renderTranscript(s.TranscriptPath, m.viewerFull)
 	if err != nil {
 		m.mode = modeBlocker
 		m.blockerText = "open transcript: " + err.Error()
@@ -166,7 +165,9 @@ func (m Model) handleView() (tea.Model, tea.Cmd) {
 	}
 	w, h := m.viewerDims()
 	m.viewer = viewport.New(w, h)
-	m.viewer.SetContent(body)
+	m.viewerPath = s.TranscriptPath
+	m.viewerRaw = body
+	m.viewer.SetContent(ansi.Wrap(body, w, " -"))
 	m.viewerTitle = sessionLabel(s)
 	m.mode = modeViewer
 	return m, nil
@@ -175,10 +176,7 @@ func (m Model) handleView() (tea.Model, tea.Cmd) {
 // viewerDims returns the viewport dimensions sized to fit inside the right
 // pane (mainBoxStyle border + padding + title + hint lines).
 func (m Model) viewerDims() (int, int) {
-	sidebarW := 36
-	if m.width < 100 {
-		sidebarW = 30
-	}
+	sidebarW := m.sidebarWidth()
 	mainW := m.width - sidebarW - 2
 	// mainBoxStyle: 1-char border each side + 1-char padding each side = -4
 	w := mainW - 4
@@ -202,6 +200,15 @@ func (m Model) updateViewer(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc", "q":
 		m.mode = modeNormal
 		return m, nil
+	case "e":
+		m.viewerFull = !m.viewerFull
+		body, err := renderTranscript(m.viewerPath, m.viewerFull)
+		if err == nil {
+			m.viewerRaw = body
+			m.viewer.SetContent(ansi.Wrap(body, m.viewer.Width, " -"))
+			m.viewer.GotoTop()
+		}
+		return m, nil
 	}
 	var cmd tea.Cmd
 	m.viewer, cmd = m.viewer.Update(msg)
@@ -221,17 +228,30 @@ func (m Model) updateDeleteConfirm(msg tea.KeyMsg, force bool) (tea.Model, tea.C
 			return m, nil
 		}
 		s := m.sessions[m.deleteTarget]
-		err := worktree.Remove(m.repo.Root, s.WorktreePath, s.Branch, force)
-		if errors.Is(err, worktree.ErrDirty) {
-			m.mode = modeDeleteForceConfirm
-			return m, nil
+
+		// Step 1: remove the git worktree (skip when there's nothing to remove).
+		if s.WorktreePath != "" {
+			err := worktree.Remove(m.repo.Root, s.WorktreePath, s.Branch, force)
+			if errors.Is(err, worktree.ErrDirty) {
+				m.mode = modeDeleteForceConfirm
+				return m, nil
+			}
+			if err != nil {
+				m.mode = modeBlocker
+				m.blockerText = "delete failed: " + err.Error()
+				m.deleteTarget = -1
+				return m, nil
+			}
 		}
-		if err != nil {
+
+		// Step 2: archive the transcript dir. Best-effort but surface failures.
+		if err := m.agent.Archive(s); err != nil {
 			m.mode = modeBlocker
-			m.blockerText = "delete failed: " + err.Error()
+			m.blockerText = "worktree removed; archive failed: " + err.Error()
 			m.deleteTarget = -1
-			return m, nil
+			return m, refreshCmd(m.repo, m.agent)
 		}
+
 		m.mode = modeNormal
 		m.deleteTarget = -1
 		return m, refreshCmd(m.repo, m.agent)
