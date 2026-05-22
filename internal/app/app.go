@@ -61,6 +61,10 @@ type Model struct {
 	viewer        viewport.Model
 	viewerTitle   string
 
+	// detailCache maps a transcript path → its lightweight summary, used to
+	// render the right-pane session detail without re-parsing on every keystroke.
+	detailCache map[string]transcriptSummary
+
 	PendingExec *ExecRequest
 }
 
@@ -83,6 +87,7 @@ func New(repo worktree.Repo, a agent.Agent) Model {
 		nameInput:    ti,
 		filterInput:  fi,
 		deleteTarget: -1,
+		detailCache:  make(map[string]transcriptSummary),
 	}
 }
 
@@ -126,6 +131,16 @@ func (m Model) Init() tea.Cmd {
 	return tea.Batch(refreshCmd(m.repo, m.agent), tickCmd())
 }
 
+// selectedTranscriptPath returns the transcript path of the currently
+// selected session, or "" if no session is selected or it has no transcript.
+func (m Model) selectedTranscriptPath() string {
+	s, _, ok := m.selected()
+	if !ok {
+		return ""
+	}
+	return s.TranscriptPath
+}
+
 type refreshMsg struct {
 	sessions []agent.Session
 	err      error
@@ -133,8 +148,24 @@ type refreshMsg struct {
 
 type tickMsg struct{}
 
+type detailMsg struct {
+	path    string
+	summary transcriptSummary
+	err     error
+}
+
 func tickCmd() tea.Cmd {
 	return tea.Tick(refreshInterval, func(time.Time) tea.Msg { return tickMsg{} })
+}
+
+func summarizeCmd(path string) tea.Cmd {
+	if path == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		sum, err := summarize(path)
+		return detailMsg{path: path, summary: sum, err: err}
+	}
 }
 
 func refreshCmd(repo worktree.Repo, a agent.Agent) tea.Cmd {

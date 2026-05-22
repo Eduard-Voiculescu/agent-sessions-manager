@@ -185,12 +185,13 @@ func (m Model) renderMain(w, h int) string {
 	if m.mode == modeViewer {
 		return m.renderViewerPane(w, h)
 	}
-	if w < 30 {
-		// Too narrow for the welcome layout — render compact session detail
-		// of the current selection instead.
-		return mainBoxStyle.Width(w).Height(h).Render(m.renderSessionDetail(w - 4))
+	if s, _, ok := m.selected(); ok {
+		return m.renderDetailPane(w, h, s)
 	}
+	return m.renderWelcomePane(w, h)
+}
 
+func (m Model) renderWelcomePane(w, h int) string {
 	title := titleStyle.Render("Agent Sessions Manager")
 	tagline := mutedStyle.Render("k9s for your coding-agent sessions")
 
@@ -209,30 +210,130 @@ func (m Model) renderMain(w, h int) string {
 		"",
 		"",
 		mutedStyle.Render("Each session is a git worktree on its own branch."),
-		mutedStyle.Render("Sessions are derived from "+filepath.Join("~", ".claude", "projects")+"."),
+		mutedStyle.Render("Sessions are derived from " + filepath.Join("~", ".claude", "projects") + "."),
 	}
-
 	content := lipgloss.JoinVertical(lipgloss.Center, rows...)
 	centered := lipgloss.Place(w-2, h-2, lipgloss.Center, lipgloss.Center, content)
 	return mainBoxStyle.Width(w).Height(h).Render(centered)
 }
 
-func (m Model) renderSessionDetail(w int) string {
-	s, _, ok := m.selected()
-	if !ok {
-		return mutedStyle.Render("no session selected")
+func (m Model) renderDetailPane(w, h int, s agent.Session) string {
+	innerW := w - 4
+	if innerW < 20 {
+		innerW = 20
 	}
-	lines := []string{
-		titleStyle.Render(sessionName(s)),
+
+	// Header line: name + state badge (+ PID when active).
+	header := titleStyle.Render(sessionName(s))
+	stateBit := badgeFor(s.State.String())
+	if s.State == agent.StateActive && s.PID != 0 {
+		stateBit += " " + mutedStyle.Render(fmt.Sprintf("PID %d", s.PID))
+	}
+
+	branch := s.Branch
+	if branch == "" {
+		branch = "—"
+	}
+
+	// Metadata rows.
+	metaRows := []string{
+		fmt.Sprintf("%s %s", labelStyle.Render("state"), stateBit),
+		fmt.Sprintf("%s %s", labelStyle.Render("branch"), branch),
+	}
+	if s.WorktreePath != "" {
+		metaRows = append(metaRows, fmt.Sprintf("%s %s",
+			labelStyle.Render("worktree"),
+			truncate(s.WorktreePath, innerW-10)))
+	}
+
+	// Transcript summary if we have one cached.
+	sum, haveSummary := m.detailCache[s.TranscriptPath]
+	if s.TranscriptPath != "" {
+		tInfo := filepath.Base(s.TranscriptPath)
+		if haveSummary {
+			tInfo += "   " + mutedStyle.Render(fmt.Sprintf(
+				"%s · %s",
+				humanBytes(sum.bytes),
+				humanAge(sum.mtime),
+			))
+			if isWritingNow(sum.mtime) {
+				tInfo += "  " + statActiveStyle.Render("● writing")
+			}
+		}
+		metaRows = append(metaRows, fmt.Sprintf("%s %s",
+			labelStyle.Render("transcript"),
+			truncate(tInfo, innerW-12)))
+	}
+
+	if haveSummary {
+		metaRows = append(metaRows, fmt.Sprintf("%s %d user · %d assistant",
+			labelStyle.Render("turns"),
+			sum.userTurns,
+			sum.assistantTurns,
+		))
+	}
+
+	// Last assistant section.
+	var lastBlock string
+	if haveSummary && sum.lastAssistant != "" {
+		divider := mutedStyle.Render(strings.Repeat("─", innerW-2) + "  last assistant turn")
+		body := wrapAndClamp(sum.lastAssistant, innerW, lastAssistantLines(h))
+		lastBlock = "\n" + divider + "\n\n" + body
+	} else if s.TranscriptPath == "" {
+		lastBlock = "\n" + mutedStyle.Render("No transcript yet. Press ↵ to launch this session.")
+	} else if !haveSummary {
+		lastBlock = "\n" + mutedStyle.Render("loading transcript…")
+	}
+
+	content := lipgloss.JoinVertical(lipgloss.Left,
+		header,
 		"",
-		fmt.Sprintf("state:   %s", badgeFor(s.State.String())),
-		fmt.Sprintf("branch:  %s", s.Branch),
-		fmt.Sprintf("path:    %s", truncate(s.WorktreePath, w-9)),
+		strings.Join(metaRows, "\n"),
+		lastBlock,
+	)
+	return mainBoxStyle.Width(w).Height(h).Render(content)
+}
+
+// lastAssistantLines returns roughly how many lines we'll dedicate to the
+// last-assistant block given the available pane height.
+func lastAssistantLines(h int) int {
+	// pane height − borders/padding (2) − header (1) − blank (1) − meta (≈5) − divider+blank (2)
+	n := h - 11
+	if n < 4 {
+		n = 4
 	}
-	if !s.LastActive.IsZero() {
-		lines = append(lines, fmt.Sprintf("active:  %s", humanAge(s.LastActive)))
+	if n > 30 {
+		n = 30
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, lines...)
+	return n
+}
+
+// wrapAndClamp soft-wraps s to width w and returns at most max lines, with an
+// ellipsis row if truncated.
+func wrapAndClamp(s string, w, max int) string {
+	wrapped := lipgloss.NewStyle().Width(w).Render(s)
+	lines := strings.Split(wrapped, "\n")
+	if len(lines) <= max {
+		return wrapped
+	}
+	out := append([]string{}, lines[:max]...)
+	out = append(out, mutedStyle.Render("…"))
+	return strings.Join(out, "\n")
+}
+
+func isWritingNow(mtime time.Time) bool {
+	return !mtime.IsZero() && time.Since(mtime) < 5*time.Second
+}
+
+func humanBytes(n int64) string {
+	switch {
+	case n < 1024:
+		return fmt.Sprintf("%d B", n)
+	case n < 1024*1024:
+		return fmt.Sprintf("%.1f KB", float64(n)/1024)
+	default:
+		return fmt.Sprintf("%.1f MB", float64(n)/1024/1024)
+	}
 }
 
 // --- footer ------------------------------------------------------------------

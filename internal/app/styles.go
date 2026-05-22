@@ -30,6 +30,10 @@ var (
 	mutedStyle      = lipgloss.NewStyle().Foreground(colorMuted)
 	accentStyle     = lipgloss.NewStyle().Foreground(colorAccent)
 
+	// labelStyle is for "branch:", "worktree:" labels in the detail pane —
+	// fixed width so values line up.
+	labelStyle = lipgloss.NewStyle().Foreground(colorMuted).Width(11)
+
 	rowStyle = lipgloss.NewStyle().Padding(0, 1)
 	rowSelectedStyle = lipgloss.NewStyle().
 				Background(colorSelected).

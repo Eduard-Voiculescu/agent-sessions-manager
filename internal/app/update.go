@@ -29,10 +29,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sessions = msg.sessions
 		m.err = msg.err
 		m.recomputeVisible()
-		return m, nil
+		return m, summarizeCmd(m.selectedTranscriptPath())
 
 	case tickMsg:
-		return m, tea.Batch(refreshCmd(m.repo, m.agent), tickCmd())
+		return m, tea.Batch(
+			refreshCmd(m.repo, m.agent),
+			tickCmd(),
+			summarizeCmd(m.selectedTranscriptPath()),
+		)
+
+	case detailMsg:
+		if msg.err == nil {
+			m.detailCache[msg.path] = msg.summary
+		}
+		return m, nil
 
 	case tea.KeyMsg:
 		switch m.mode {
@@ -67,10 +77,12 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.Up):
 		if m.cursor > 0 {
 			m.cursor--
+			return m, summarizeCmd(m.selectedTranscriptPath())
 		}
 	case key.Matches(msg, keys.Down):
 		if m.cursor < len(m.visible)-1 {
 			m.cursor++
+			return m, summarizeCmd(m.selectedTranscriptPath())
 		}
 	case key.Matches(msg, keys.New):
 		m.mode = modeNewPrompt
